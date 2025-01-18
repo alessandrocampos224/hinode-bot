@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import threading
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
@@ -10,7 +11,9 @@ from io import StringIO, BytesIO
 import logging
 from dotenv import load_dotenv
 from flask import Flask
-from threading import Thread
+
+# Criar app Flask
+app = Flask(__name__)
 
 # Configurar logging
 logging.basicConfig(
@@ -32,11 +35,9 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-app = Flask(__name__)
-
 @app.route('/')
 def home():
-    return "Bot está rodando!"
+    return 'Bot está rodando!'
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -134,26 +135,30 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def run_bot():
     try:
+        # Iniciar o bot
         application = Application.builder().token(TOKEN).build()
+        
+        # Adicionar handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+        
+        # Iniciar o polling
         await application.initialize()
         await application.start()
-        await application.run_polling()
+        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+        
     except Exception as e:
         logger.error(f"Erro ao iniciar o bot: {e}")
+        sys.exit(1)
 
 def run_flask():
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
 
-def main():
-    # Iniciar Flask em uma thread
-    flask_thread = Thread(target=run_flask)
+if __name__ == "__main__":
+    # Criar thread para o Flask
+    flask_thread = threading.Thread(target=run_flask)
     flask_thread.start()
     
-    # Executar o bot no loop de eventos principal
+    # Iniciar o bot no thread principal
     asyncio.run(run_bot())
-
-if __name__ == "__main__":
-    main()
