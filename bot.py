@@ -1,7 +1,5 @@
 import os
 import sys
-import asyncio
-import threading
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
@@ -9,12 +7,8 @@ from bs4 import BeautifulSoup
 import csv
 from io import StringIO, BytesIO
 import logging
-from dotenv import load_dotenv
-from fastapi import FastAPI
-import uvicorn
-
-# Criar app FastAPI
-app = FastAPI()
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 # Configurar logging
 logging.basicConfig(
@@ -31,14 +25,21 @@ if not TOKEN:
     logger.error("Token não encontrado!")
     sys.exit(1)
 
+# URL base do Render (substitua pelo seu domínio)
+WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://hinode-bot.onrender.com')
+WEBHOOK_PATH = f"/webhook/{TOKEN}"
+WEBHOOK_URL = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+
 # Headers para a requisição
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-@app.get("/")
-async def home():
-    return {"status": "Bot está rodando!"}
+# Criar aplicação FastAPI
+app = FastAPI()
+
+# Criar aplicação do bot
+application = Application.builder().token(TOKEN).build()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -48,7 +49,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "eu vou gerar um arquivo CSV com todas as informações.\n\n"
             "Exemplo: https://www.hinode.com.br/fragrancias/fragrancias-masculinas"
         )
-        logger.info("Comando start executado com sucesso")
     except Exception as e:
         logger.error(f"Erro no comando start: {e}")
 
@@ -127,41 +127,41 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             filename="produtos_hinode.csv",
             caption=f"✅ Concluído! {len(products)} produtos encontrados."
         )
-        logger.info(f"CSV gerado com {len(products)} produtos")
         
         await message.delete()
 
     except Exception as e:
-        logger.error(f"Erro ao processar URL: {e}")
         error_msg = f"❌ Erro ao processar: {str(e)}"
         try:
             await message.edit_text(error_msg)
         except:
             await update.message.reply_text(error_msg)
 
-async def run_bot():
-    try:
-        logger.info("Iniciando o bot...")
-        application = Application.builder().token(TOKEN).build()
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-        
-        await application.initialize()
-        await application.start()
-        await application.run_polling(allowed_updates=Update.ALL_TYPES)
-        
-    except Exception as e:
-        logger.error(f"Erro ao iniciar o bot: {e}")
-        sys.exit(1)
+# Configurar handlers
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
 
-def run_fastapi():
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+# Rota para webhook
+@app.post(WEBHOOK_PATH)
+async def webhook_handler(request: Request):
+    data = await request.json()
+    update = Update.de_json(data, application.bot)
+    await application.process_update(update)
+    return JSONResponse(content={"status": "ok"})
+
+@app.get("/")
+async def home():
+    return {"status": "Bot está rodando!"}
+
+@app.on_event("startup")
+async def startup():
+    webhook_info = await application.bot.get_webhook_info()
+    if webhook_info.url != WEBHOOK_URL:
+        logger.info(f"Configurando webhook para: {WEBHOOK_URL}")
+        await application.bot.set_webhook(url=WEBHOOK_URL)
+    logger.info("Bot iniciado com webhook!")
 
 if __name__ == "__main__":
-    # Criar thread para o FastAPI
-    api_thread = threading.Thread(target=run_fastapi)
-    api_thread.start()
-    
-    # Iniciar o bot no thread principal
-    asyncio.run(run_bot())
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
