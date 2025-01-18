@@ -10,10 +10,11 @@ import csv
 from io import StringIO, BytesIO
 import logging
 from dotenv import load_dotenv
-from flask import Flask
+from fastapi import FastAPI
+import uvicorn
 
-# Criar app Flask
-app = Flask(__name__)
+# Criar app FastAPI
+app = FastAPI()
 
 # Configurar logging
 logging.basicConfig(
@@ -35,9 +36,9 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-@app.route('/')
-def home():
-    return 'Bot está rodando!'
+@app.get("/")
+async def home():
+    return {"status": "Bot está rodando!"}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -47,6 +48,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "eu vou gerar um arquivo CSV com todas as informações.\n\n"
             "Exemplo: https://www.hinode.com.br/fragrancias/fragrancias-masculinas"
         )
+        logger.info("Comando start executado com sucesso")
     except Exception as e:
         logger.error(f"Erro no comando start: {e}")
 
@@ -99,6 +101,7 @@ def create_csv(products: list) -> BytesIO:
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
+    logger.info(f"Recebido URL: {url}")
     
     if not "hinode.com.br" in url.lower():
         await update.message.reply_text("❌ Por favor, envie apenas links do site da Hinode.")
@@ -106,6 +109,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         message = await update.message.reply_text("🔄 Coletando produtos...")
+        logger.info("Iniciando coleta de produtos")
         
         products = scrape_hinode(url)
         if not products:
@@ -123,10 +127,12 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             filename="produtos_hinode.csv",
             caption=f"✅ Concluído! {len(products)} produtos encontrados."
         )
+        logger.info(f"CSV gerado com {len(products)} produtos")
         
         await message.delete()
 
     except Exception as e:
+        logger.error(f"Erro ao processar URL: {e}")
         error_msg = f"❌ Erro ao processar: {str(e)}"
         try:
             await message.edit_text(error_msg)
@@ -135,14 +141,11 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def run_bot():
     try:
-        # Iniciar o bot
+        logger.info("Iniciando o bot...")
         application = Application.builder().token(TOKEN).build()
-        
-        # Adicionar handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
         
-        # Iniciar o polling
         await application.initialize()
         await application.start()
         await application.run_polling(allowed_updates=Update.ALL_TYPES)
@@ -151,14 +154,14 @@ async def run_bot():
         logger.error(f"Erro ao iniciar o bot: {e}")
         sys.exit(1)
 
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+def run_fastapi():
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    # Criar thread para o Flask
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.start()
+    # Criar thread para o FastAPI
+    api_thread = threading.Thread(target=run_fastapi)
+    api_thread.start()
     
     # Iniciar o bot no thread principal
     asyncio.run(run_bot())
