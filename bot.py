@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
@@ -8,10 +9,8 @@ import csv
 from io import StringIO, BytesIO
 import logging
 from dotenv import load_dotenv
-from flask import Flask, jsonify
-
-# Criar app Flask para manter o web service ativo
-app = Flask(__name__)
+from flask import Flask
+from threading import Thread
 
 # Configurar logging
 logging.basicConfig(
@@ -33,10 +32,11 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-# Rota para manter o serviço ativo
+app = Flask(__name__)
+
 @app.route('/')
 def home():
-    return jsonify({"status": "Bot está rodando!"})
+    return "Bot está rodando!"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -132,25 +132,28 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             await update.message.reply_text(error_msg)
 
-def main():
+async def run_bot():
     try:
-        # Iniciar o bot
         application = Application.builder().token(TOKEN).build()
         application.add_handler(CommandHandler("start", start))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
+        await application.initialize()
+        await application.start()
+        await application.run_polling()
     except Exception as e:
         logger.error(f"Erro ao iniciar o bot: {e}")
 
-# Iniciar o serviço web e o bot
-if __name__ == "__main__":
-    # Obter a porta do ambiente (Render vai fornecer isso)
+def run_flask():
     port = int(os.environ.get("PORT", 5000))
-    
-    # Iniciar o bot em uma thread separada
-    from threading import Thread
-    bot_thread = Thread(target=main)
-    bot_thread.start()
-    
-    # Iniciar o servidor Flask
     app.run(host="0.0.0.0", port=port)
+
+def main():
+    # Iniciar Flask em uma thread
+    flask_thread = Thread(target=run_flask)
+    flask_thread.start()
+    
+    # Executar o bot no loop de eventos principal
+    asyncio.run(run_bot())
+
+if __name__ == "__main__":
+    main()
