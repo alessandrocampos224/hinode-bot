@@ -51,22 +51,82 @@ def scrape_hinode(url: str) -> list:
         soup = BeautifulSoup(response.text, 'html.parser')
         products = []
 
-        for product in soup.select('li.item.product.product-item'):
-            try:
-                name = product.select_one('.product-item-link')
-                price = product.select_one('.price')
-                image = product.select_one('img.product-image-photo')
-                link = product.select_one('a.product-item-link')
-                sku = product.select_one('[data-product-id]')
+        logger.info("Iniciando busca por produtos na página")
+    # Primeiro tenta o layout da página de categoria
+    products_elements = soup.select('.products.list.items.product-items .item.product')
+    
+    # Se não encontrar, tenta o layout da página de produto único
+    if not products_elements:
+        products_elements = [soup.select_one('.product-info-main')]
+        logger.info("Usando layout de produto único")
+    
+    logger.info(f"Encontrados {len(products_elements)} elementos de produto")
 
-                if name:
+    for product in products_elements:
+        if not product:
+            continue
+            
+        try:
+            # Tenta diferentes seletores para o nome
+            name = (product.select_one('.product-item-name') or 
+                   product.select_one('.page-title') or 
+                   product.select_one('[itemprop="name"]'))
+            
+            # Tenta diferentes seletores para o preço
+            price = (product.select_one('.price') or 
+                    product.select_one('[data-price-type="finalPrice"]'))
+            
+            # Tenta diferentes seletores para a imagem
+            image = (product.select_one('img.product-image-photo') or 
+                    soup.select_one('.gallery-placeholder img'))
+            
+            # Tenta diferentes seletores para o link
+            link = (product.select_one('.product-item-link') or 
+                   soup.select_one('link[rel="canonical"]'))
+            
+            # Tenta diferentes seletores para o SKU
+            sku = (product.select_one('[data-product-id]') or 
+                  product.select_one('.product.attribute.sku .value'))
+
+                # Extrai e limpa os dados
+                nome_texto = name.get_text().strip() if name else None
+                if nome_texto:
+                    # Extrai preço
+                    preco_texto = price.get_text().strip() if price else "Preço não disponível"
+                    
+                    # Extrai SKU/Código
+                    codigo = ""
+                    if sku:
+                        if sku.has_attr('data-product-id'):
+                            codigo = sku['data-product-id']
+                        else:
+                            codigo = sku.get_text().strip()
+                    
+                    # Extrai imagem
+                    imagem_url = ""
+                    if image:
+                        if image.has_attr('src'):
+                            imagem_url = image['src']
+                        elif image.has_attr('data-src'):
+                            imagem_url = image['data-src']
+                    
+                    # Extrai link
+                    link_url = ""
+                    if link:
+                        if link.has_attr('href'):
+                            link_url = link['href']
+                        elif link.has_attr('content'):
+                            link_url = link['content']
+                    
+                    # Adiciona o produto à lista
                     products.append({
-                        "Nome": name.text.strip(),
-                        "Preço": price.text.strip() if price else "Preço não disponível",
-                        "Código": sku['data-product-id'] if sku else "",
-                        "Imagem": image['src'] if image else "",
-                        "Link": link['href'] if link else ""
+                        "Nome": nome_texto,
+                        "Preço": preco_texto,
+                        "Código": codigo,
+                        "Imagem": imagem_url,
+                        "Link": link_url
                     })
+                    logger.info(f"Produto processado: {nome_texto}")
             except Exception as e:
                 logger.error(f"Erro ao processar produto: {e}")
                 continue
