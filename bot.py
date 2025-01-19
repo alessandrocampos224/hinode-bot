@@ -1,16 +1,15 @@
 import os
 import sys
-import time
+import json
+from urllib.parse import urlparse, parse_qs
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
-from bs4 import BeautifulSoup
 import csv
 from io import StringIO, BytesIO
 import logging
 from fastapi import FastAPI, Request
 import uvicorn
-import random
 
 # Configurar logging
 logging.basicConfig(
@@ -26,22 +25,12 @@ if not TOKEN:
     logger.error("Token não encontrado!")
     sys.exit(1)
 
-# Headers para simular um navegador real
+# Headers para API
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Connection': 'keep-alive',
-    'Cache-Control': 'max-age=0',
-    'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-    'Upgrade-Insecure-Requests': '1'
+    'Accept': 'application/json',
+    'Store': 'hinode',
+    'Content-Type': 'application/json'
 }
 
 # Criar app FastAPI
@@ -58,110 +47,62 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Erro no comando start: {e}")
 
-def scrape_hinode(url: str) -> list:
+def get_product_info(url: str) -> list:
     try:
-        logger.info(f"Iniciando scraping da URL: {url}")
+        logger.info(f"Obtendo informações do produto: {url}")
         
-        # Adicionar delay aleatório
-        time.sleep(random.uniform(1, 3))
+        # Se for página de produto único
+        if '/p' in url:
+            # Extrair SKU da URL
+            path = urlparse(url).path
+            sku = path.split('/')[-2] if path.endswith('/p') else path.split('/')[-1]
+            
+            # URL da API de produto
+            api_url = f"https://api.hinode.com.br/v2/products/{sku}"
+            response = requests.get(api_url, headers=HEADERS)
+            
+            if response.status_code == 200:
+                product_data = response.json()
+                return [{
+                    "Nome": product_data.get('name', 'Nome não disponível'),
+                    "Preço": f"R$ {product_data.get('price', 0):.2f}",
+                    "Código": product_data.get('sku', ''),
+                    "Descrição": product_data.get('description', ''),
+                    "Imagem": product_data.get('image', {}).get('url', ''),
+                    "Link": url
+                }]
         
-        session = requests.Session()
-        # Primeiro faz uma requisição para a página inicial
-        session.get("https://www.hinode.com.br", headers=HEADERS, timeout=30)
+        # Se for página de categoria
+        else:
+            # Extrair categoria da URL
+            category = urlparse(url).path.split('/')[-1]
+            
+            # URL da API de categoria
+            api_url = f"https://api.hinode.com.br/v2/categories/{category}/products"
+            params = {
+                "page": 1,
+                "pageSize": 48,
+                "sort": "relevance"
+            }
+            
+            response = requests.get(api_url, headers=HEADERS, params=params)
+            
+            if response.status_code == 200:
+                category_data = response.json()
+                products = category_data.get('items', [])
+                
+                return [{
+                    "Nome": product.get('name', 'Nome não disponível'),
+                    "Preço": f"R$ {product.get('price', 0):.2f}",
+                    "Código": product.get('sku', ''),
+                    "Descrição": product.get('shortDescription', ''),
+                    "Imagem": product.get('image', {}).get('url', ''),
+                    "Link": f"https://www.hinode.com.br/{product.get('url', '')}"
+                } for product in products]
         
-        # Adiciona referrer nos headers
-        HEADERS['Referer'] = 'https://www.hinode.com.br'
-        
-        # Faz a requisição para a URL do produto
-        response = session.get(url, headers=HEADERS, timeout=30)
-        response.raise_for_status()
-        
-        logger.info(f"Status da resposta: {response.status_code}")
-        logger.info(f"Tamanho da resposta: {len(response.text)} bytes")
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        products = []
-
-        # Debug: salvar HTML para análise
-        logger.info("Primeiros 500 caracteres do HTML:")
-        logger.info(response.text[:500])
-
-        # Tentar diferentes padrões de estrutura
-        product_elements = (
-            soup.select('.product-items .product-item') or
-            soup.select('.products-grid .product-item') or
-            soup.select('.category-products .item') or
-            [soup.select_one('.product-info-main')] # Para página de produto único
-        )
-
-        if not product_elements or all(x is None for x in product_elements):
-            logger.warning("Nenhum produto encontrado nos seletores principais")
-            # Tentar encontrar qualquer elemento com preço
-            price_elements = soup.select('[data-price-type], .price')
-            if price_elements:
-                for price_elem in price_elements:
-                    parent = price_elem.find_parent('.product-item') or price_elem.find_parent('.item')
-                    if parent and parent not in product_elements:
-                        product_elements.append(parent)
-
-        logger.info(f"Encontrados {len(product_elements)} elementos de produto")
-
-        for product in product_elements:
-            if not product:
-                continue
-
-            try:
-                # Busca por diferentes padrões de elementos
-                name_elem = (
-                    product.select_one('.product-name') or
-                    product.select_one('.product-item-name') or
-                    product.select_one('.page-title .base') or
-                    product.select_one('.product-item-link')
-                )
-
-                price_elem = (
-                    product.select_one('.special-price .price') or
-                    product.select_one('.normal-price .price') or
-                    product.select_one('.price-wrapper .price') or
-                    product.select_one('.price')
-                )
-
-                img_elem = (
-                    product.select_one('.product-image-photo') or
-                    product.select_one('.photo img') or
-                    product.select_one('img[data-role="product-image"]')
-                )
-
-                link_elem = (
-                    product.select_one('.product-item-link') or
-                    product.select_one('.product-image')
-                )
-
-                if name_elem:
-                    name = name_elem.get_text().strip()
-                    price = price_elem.get_text().strip() if price_elem else "Preço não disponível"
-                    image = img_elem.get('src') if img_elem else ""
-                    link = link_elem.get('href') if link_elem else url
-
-                    product_data = {
-                        "Nome": name,
-                        "Preço": price,
-                        "Imagem": image,
-                        "Link": link
-                    }
-
-                    logger.info(f"Produto encontrado: {name}")
-                    products.append(product_data)
-
-            except Exception as e:
-                logger.error(f"Erro ao processar produto individual: {e}")
-                continue
-
-        logger.info(f"Total de produtos processados: {len(products)}")
-        return products
-
+        return []
     except Exception as e:
-        logger.error(f"Erro durante o scraping: {e}")
+        logger.error(f"Erro ao obter informações do produto: {e}")
         raise
 
 def create_csv(products: list) -> BytesIO:
@@ -192,7 +133,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = await update.message.reply_text("🔄 Coletando produtos...")
         logger.info("Iniciando coleta de produtos")
         
-        products = scrape_hinode(url)
+        products = get_product_info(url)
         if not products:
             await message.edit_text("❌ Nenhum produto encontrado. Tente um link diferente.")
             return
