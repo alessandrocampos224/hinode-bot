@@ -8,7 +8,7 @@ import csv
 from io import StringIO, BytesIO
 import logging
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+import uvicorn
 
 # Configurar logging
 logging.basicConfig(
@@ -16,31 +16,23 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     stream=sys.stdout
 )
-
 logger = logging.getLogger(__name__)
 
-# Token do bot
+# Configurações
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 if not TOKEN:
     logger.error("Token não encontrado!")
     sys.exit(1)
 
-# URL base do Render (substitua pelo seu domínio)
-WEBHOOK_URL = os.getenv('RENDER_EXTERNAL_URL', 'https://hinode-bot.onrender.com')
-WEBHOOK_PATH = f"/webhook/{TOKEN}"
-WEBHOOK_URL = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-
-# Headers para a requisição
+# Headers para requisições
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
-# Criar aplicação FastAPI
+# Criar app FastAPI
 app = FastAPI()
 
-# Criar aplicação do bot
-application = Application.builder().token(TOKEN).build()
-
+# Funções do bot
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text(
@@ -127,41 +119,53 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             filename="produtos_hinode.csv",
             caption=f"✅ Concluído! {len(products)} produtos encontrados."
         )
+        logger.info("CSV enviado com sucesso")
         
         await message.delete()
 
     except Exception as e:
+        logger.error(f"Erro ao processar URL: {e}")
         error_msg = f"❌ Erro ao processar: {str(e)}"
         try:
             await message.edit_text(error_msg)
         except:
             await update.message.reply_text(error_msg)
 
-# Configurar handlers
-application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+# Inicialização do bot
+bot = Application.builder().token(TOKEN).build()
 
-# Rota para webhook
-@app.post(WEBHOOK_PATH)
+async def setup_bot():
+    """Configurar o bot com seus handlers"""
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
+    await bot.initialize()
+    logger.info("Bot configurado com sucesso!")
+
+@app.post(f"/webhook/{TOKEN}")
 async def webhook_handler(request: Request):
-    data = await request.json()
-    update = Update.de_json(data, application.bot)
-    await application.process_update(update)
-    return JSONResponse(content={"status": "ok"})
-
-@app.get("/")
-async def home():
-    return {"status": "Bot está rodando!"}
+    """Manipular atualizações do Telegram"""
+    try:
+        data = await request.json()
+        update = Update.de_json(data, bot.bot)
+        await bot.process_update(update)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Erro no webhook: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.on_event("startup")
-async def startup():
-    webhook_info = await application.bot.get_webhook_info()
-    if webhook_info.url != WEBHOOK_URL:
-        logger.info(f"Configurando webhook para: {WEBHOOK_URL}")
-        await application.bot.set_webhook(url=WEBHOOK_URL)
-    logger.info("Bot iniciado com webhook!")
+async def on_startup():
+    """Configurar webhook quando a aplicação iniciar"""
+    webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL', 'https://your-app.onrender.com')}/webhook/{TOKEN}"
+    await setup_bot()
+    await bot.bot.set_webhook(webhook_url)
+    logger.info(f"Webhook configurado para: {webhook_url}")
+
+@app.get("/")
+async def root():
+    """Rota de teste"""
+    return {"status": "Bot está rodando!"}
 
 if __name__ == "__main__":
-    import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
