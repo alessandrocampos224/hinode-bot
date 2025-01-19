@@ -32,7 +32,6 @@ HEADERS = {
 # Criar app FastAPI
 app = FastAPI()
 
-# Funções do bot
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await update.message.reply_text(
@@ -46,99 +45,98 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def scrape_hinode(url: str) -> list:
     try:
+        logger.info(f"Iniciando scraping da URL: {url}")
         response = requests.get(url, headers=HEADERS, timeout=30)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         products = []
 
-        logger.info("Iniciando busca por produtos na página")
-    # Primeiro tenta o layout da página de categoria
-    products_elements = soup.select('.products.list.items.product-items .item.product')
-    
-    # Se não encontrar, tenta o layout da página de produto único
-    if not products_elements:
-        products_elements = [soup.select_one('.product-info-main')]
-        logger.info("Usando layout de produto único")
-    
-    logger.info(f"Encontrados {len(products_elements)} elementos de produto")
+        # Tentar diferentes seletores para encontrar produtos
+        selectors = [
+            '.products.list.items.product-items .item.product',
+            '.product.media',
+            '.product-item-info',
+            '[data-product-id]'
+        ]
 
-    for product in products_elements:
-        if not product:
-            continue
-            
-        try:
-            # Tenta diferentes seletores para o nome
-            name = (product.select_one('.product-item-name') or 
-                   product.select_one('.page-title') or 
-                   product.select_one('[itemprop="name"]'))
-            
-            # Tenta diferentes seletores para o preço
-            price = (product.select_one('.price') or 
-                    product.select_one('[data-price-type="finalPrice"]'))
-            
-            # Tenta diferentes seletores para a imagem
-            image = (product.select_one('img.product-image-photo') or 
-                    soup.select_one('.gallery-placeholder img'))
-            
-            # Tenta diferentes seletores para o link
-            link = (product.select_one('.product-item-link') or 
-                   soup.select_one('link[rel="canonical"]'))
-            
-            # Tenta diferentes seletores para o SKU
-            sku = (product.select_one('[data-product-id]') or 
-                  product.select_one('.product.attribute.sku .value'))
+        found_products = []
+        for selector in selectors:
+            found_products = soup.select(selector)
+            if found_products:
+                logger.info(f"Encontrados {len(found_products)} produtos usando seletor: {selector}")
+                break
 
-                # Extrai e limpa os dados
-                nome_texto = name.get_text().strip() if name else None
-                if nome_texto:
-                    # Extrai preço
-                    preco_texto = price.get_text().strip() if price else "Preço não disponível"
+        if not found_products:
+            logger.warning("Nenhum produto encontrado com os seletores padrão")
+            # Tentar página de produto único
+            product_title = soup.select_one('.page-title span')
+            if product_title:
+                logger.info("Encontrado produto único")
+                found_products = [soup]
+
+        for product in found_products:
+            try:
+                # Tentar diferentes seletores para cada informação
+                name = (
+                    product.select_one('.product-item-name') or 
+                    product.select_one('.page-title span') or 
+                    product.select_one('.product-item-link')
+                )
+
+                price = (
+                    product.select_one('.price') or 
+                    product.select_one('.price-wrapper') or 
+                    product.select_one('[data-price-type="finalPrice"]')
+                )
+
+                image = (
+                    product.select_one('img.product-image-photo') or 
+                    product.select_one('.product.photo.product-item-photo img') or
+                    product.select_one('.gallery-placeholder img')
+                )
+
+                link = (
+                    product.select_one('.product-item-link') or 
+                    product.select_one('.product.photo.product-item-photo') or
+                    soup.select_one('link[rel="canonical"]')
+                )
+
+                if name:
+                    name_text = name.get_text().strip()
+                    price_text = price.get_text().strip() if price else "Preço não disponível"
+                    image_url = image['src'] if image and image.has_attr('src') else ""
+                    product_link = ""
                     
-                    # Extrai SKU/Código
-                    codigo = ""
-                    if sku:
-                        if sku.has_attr('data-product-id'):
-                            codigo = sku['data-product-id']
-                        else:
-                            codigo = sku.get_text().strip()
-                    
-                    # Extrai imagem
-                    imagem_url = ""
-                    if image:
-                        if image.has_attr('src'):
-                            imagem_url = image['src']
-                        elif image.has_attr('data-src'):
-                            imagem_url = image['data-src']
-                    
-                    # Extrai link
-                    link_url = ""
                     if link:
                         if link.has_attr('href'):
-                            link_url = link['href']
+                            product_link = link['href']
                         elif link.has_attr('content'):
-                            link_url = link['content']
+                            product_link = link['content']
+
+                    product_data = {
+                        "Nome": name_text,
+                        "Preço": price_text,
+                        "Imagem": image_url,
+                        "Link": product_link
+                    }
                     
-                    # Adiciona o produto à lista
-                    products.append({
-                        "Nome": nome_texto,
-                        "Preço": preco_texto,
-                        "Código": codigo,
-                        "Imagem": imagem_url,
-                        "Link": link_url
-                    })
-                    logger.info(f"Produto processado: {nome_texto}")
+                    products.append(product_data)
+                    logger.info(f"Produto processado: {name_text}")
+
             except Exception as e:
-                logger.error(f"Erro ao processar produto: {e}")
+                logger.error(f"Erro ao processar produto individual: {e}")
                 continue
 
         return products
+
     except Exception as e:
-        logger.error(f"Erro no scraping: {e}")
+        logger.error(f"Erro durante o scraping: {e}")
         raise
 
 def create_csv(products: list) -> BytesIO:
     try:
         if not products:
+            logger.warning("Nenhum produto para criar CSV")
             return None
             
         output = StringIO()
