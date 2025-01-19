@@ -1,7 +1,7 @@
 import os
 import sys
-import json
-from urllib.parse import urlparse, parse_qs
+import re
+from urllib.parse import urlparse, unquote
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
@@ -19,111 +19,95 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Configurações
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 if not TOKEN:
     logger.error("Token não encontrado!")
     sys.exit(1)
 
-# Headers para API
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json',
-    'Store': 'hinode',
-    'Content-Type': 'application/json'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Connection': 'keep-alive'
 }
 
-# Criar app FastAPI
 app = FastAPI()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await update.message.reply_text(
-            "👋 Olá! Eu sou o bot da Hinode.\n\n"
-            "Me envie um link de qualquer página de produtos da Hinode e "
-            "eu vou gerar um arquivo CSV com todas as informações.\n\n"
-            "Exemplo: https://www.hinode.com.br/fragrancias/fragrancias-masculinas"
-        )
-    except Exception as e:
-        logger.error(f"Erro no comando start: {e}")
+    await update.message.reply_text(
+        "👋 Olá! Eu sou o bot da Hinode.\n\n"
+        "Me envie um link de qualquer página de produtos da Hinode e "
+        "eu vou gerar um arquivo CSV com todas as informações.\n\n"
+        "Exemplo: https://www.hinode.com.br/fragrancias/fragrancias-masculinas"
+    )
 
-def get_product_info(url: str) -> list:
+def extract_product_info(url: str) -> dict:
+    """Extrai informações de um produto da página"""
     try:
-        logger.info(f"Obtendo informações do produto: {url}")
+        logger.info(f"Extraindo informações da URL: {url}")
+        response = requests.get(url, headers=HEADERS, timeout=30)
+        response.raise_for_status()
         
-        # Se for página de produto único
-        if '/p' in url:
-            # Extrair SKU da URL
-            path = urlparse(url).path
-            sku = path.split('/')[-2] if path.endswith('/p') else path.split('/')[-1]
-            
-            # URL da API de produto
-            api_url = f"https://api.hinode.com.br/v2/products/{sku}"
-            response = requests.get(api_url, headers=HEADERS)
-            
-            if response.status_code == 200:
-                product_data = response.json()
-                return [{
-                    "Nome": product_data.get('name', 'Nome não disponível'),
-                    "Preço": f"R$ {product_data.get('price', 0):.2f}",
-                    "Código": product_data.get('sku', ''),
-                    "Descrição": product_data.get('description', ''),
-                    "Imagem": product_data.get('image', {}).get('url', ''),
-                    "Link": url
-                }]
-        
-        # Se for página de categoria
-        else:
-            # Extrair categoria da URL
-            category = urlparse(url).path.split('/')[-1]
-            
-            # URL da API de categoria
-            api_url = f"https://api.hinode.com.br/v2/categories/{category}/products"
-            params = {
-                "page": 1,
-                "pageSize": 48,
-                "sort": "relevance"
-            }
-            
-            response = requests.get(api_url, headers=HEADERS, params=params)
-            
-            if response.status_code == 200:
-                category_data = response.json()
-                products = category_data.get('items', [])
-                
-                return [{
-                    "Nome": product.get('name', 'Nome não disponível'),
-                    "Preço": f"R$ {product.get('price', 0):.2f}",
-                    "Código": product.get('sku', ''),
-                    "Descrição": product.get('shortDescription', ''),
-                    "Imagem": product.get('image', {}).get('url', ''),
-                    "Link": f"https://www.hinode.com.br/{product.get('url', '')}"
-                } for product in products]
-        
-        return []
+        # Extrair dados usando regex
+        name_match = re.search(r'<h1[^>]*class="[^"]*page-title[^"]*"[^>]*>.*?<span>(.*?)</span>', response.text)
+        price_match = re.search(r'<span[^>]*class="[^"]*price[^"]*"[^>]*>(R?\$?\s*[\d,.]+)', response.text)
+        image_match = re.search(r'<img[^>]*class="[^"]*gallery-placeholder__image[^"]*"[^>]*src="([^"]*)"', response.text)
+        sku_match = re.search(r'data-product-id="(\d+)"', response.text)
+        desc_match = re.search(r'<div[^>]*class="[^"]*description[^"]*"[^>]*>(.*?)</div>', response.text, re.DOTALL)
+
+        product = {
+            "Nome": unquote(name_match.group(1).strip()) if name_match else "Nome não encontrado",
+            "Preço": price_match.group(1).strip() if price_match else "Preço não disponível",
+            "Código": sku_match.group(1) if sku_match else "",
+            "Imagem": image_match.group(1) if image_match else "",
+            "Link": url,
+            "Descrição": desc_match.group(1).strip() if desc_match else ""
+        }
+
+        logger.info(f"Produto encontrado: {product['Nome']}")
+        return product
     except Exception as e:
-        logger.error(f"Erro ao obter informações do produto: {e}")
-        raise
+        logger.error(f"Erro ao extrair informações: {e}")
+        return None
+
+def extract_products_from_category(url: str) -> list:
+    """Extrai informações de produtos de uma página de categoria"""
+    try:
+        logger.info(f"Extraindo produtos da categoria: {url}")
+        response = requests.get(url, headers=HEADERS, timeout=30)
+        response.raise_for_status()
+        
+        # Extrair links dos produtos
+        product_links = re.findall(r'<a[^>]*class="[^"]*product-item-link[^"]*"[^>]*href="([^"]*)"', response.text)
+        
+        products = []
+        for link in product_links[:10]:  # Limitar a 10 produtos por vez
+            try:
+                product = extract_product_info(link)
+                if product:
+                    products.append(product)
+            except Exception as e:
+                logger.error(f"Erro ao processar produto {link}: {e}")
+                continue
+                
+        return products
+    except Exception as e:
+        logger.error(f"Erro ao extrair produtos da categoria: {e}")
+        return []
 
 def create_csv(products: list) -> BytesIO:
-    try:
-        if not products:
-            logger.warning("Nenhum produto para criar CSV")
-            return None
-            
-        output = StringIO()
-        writer = csv.DictWriter(output, fieldnames=products[0].keys())
-        writer.writeheader()
-        writer.writerows(products)
-        
-        return BytesIO(output.getvalue().encode('utf-8'))
-    except Exception as e:
-        logger.error(f"Erro ao criar CSV: {e}")
+    if not products:
         return None
+        
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=products[0].keys())
+    writer.writeheader()
+    writer.writerows(products)
+    
+    return BytesIO(output.getvalue().encode('utf-8'))
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
-    logger.info(f"Recebido URL: {url}")
     
     if not "hinode.com.br" in url.lower():
         await update.message.reply_text("❌ Por favor, envie apenas links do site da Hinode.")
@@ -131,9 +115,14 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         message = await update.message.reply_text("🔄 Coletando produtos...")
-        logger.info("Iniciando coleta de produtos")
         
-        products = get_product_info(url)
+        # Verifica se é uma página de produto ou categoria
+        if '/p' in url:
+            product = extract_product_info(url)
+            products = [product] if product else []
+        else:
+            products = extract_products_from_category(url)
+
         if not products:
             await message.edit_text("❌ Nenhum produto encontrado. Tente um link diferente.")
             return
@@ -149,23 +138,17 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
             filename="produtos_hinode.csv",
             caption=f"✅ Concluído! {len(products)} produtos encontrados."
         )
-        logger.info("CSV enviado com sucesso")
         
         await message.delete()
 
     except Exception as e:
         logger.error(f"Erro ao processar URL: {e}")
-        error_msg = f"❌ Erro ao processar: {str(e)}"
-        try:
-            await message.edit_text(error_msg)
-        except:
-            await update.message.reply_text(error_msg)
+        await message.edit_text(f"❌ Erro ao processar. Por favor, tente novamente.")
 
-# Inicialização do bot
+# Configuração do bot e webhook
 bot = Application.builder().token(TOKEN).build()
 
 async def setup_bot():
-    """Configurar o bot com seus handlers"""
     bot.add_handler(CommandHandler("start", start))
     bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
     await bot.initialize()
@@ -173,7 +156,6 @@ async def setup_bot():
 
 @app.post(f"/webhook/{TOKEN}")
 async def webhook_handler(request: Request):
-    """Manipular atualizações do Telegram"""
     try:
         data = await request.json()
         update = Update.de_json(data, bot.bot)
@@ -185,7 +167,6 @@ async def webhook_handler(request: Request):
 
 @app.on_event("startup")
 async def on_startup():
-    """Configurar webhook quando a aplicação iniciar"""
     webhook_url = f"{os.getenv('RENDER_EXTERNAL_URL', 'https://your-app.onrender.com')}/webhook/{TOKEN}"
     await setup_bot()
     await bot.bot.set_webhook(webhook_url)
@@ -193,7 +174,6 @@ async def on_startup():
 
 @app.get("/")
 async def root():
-    """Rota de teste"""
     return {"status": "Bot está rodando!"}
 
 if __name__ == "__main__":
