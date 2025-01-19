@@ -1,17 +1,18 @@
 import os
 import sys
 import re
+import json
 from urllib.parse import urlparse, unquote
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import requests
+from bs4 import BeautifulSoup
 import csv
 from io import StringIO, BytesIO
 import logging
 from fastapi import FastAPI, Request
 import uvicorn
 
-# Configurar logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -26,12 +27,167 @@ if not TOKEN:
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Connection': 'keep-alive'
 }
 
 app = FastAPI()
+
+def clean_text(text):
+    """Limpa e formata o texto removendo espaços extras e caracteres especiais"""
+    if not text:
+        return ""
+    text = re.sub(r'\s+', ' ', text.strip())
+    text = text.replace('\n', ' ').replace('\r', '')
+    return text
+
+def format_price(price):
+    """Formata o preço para um formato consistente"""
+    if not price:
+        return "Preço não disponível"
+    price = re.sub(r'[^\d,.]', '', price)
+    if ',' in price and '.' in price:
+        price = price.replace('.', '').replace(',', '.')
+    elif ',' in price:
+        price = price.replace(',', '.')
+    try:
+        return f"R$ {float(price):.2f}"
+    except:
+        return price
+
+def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
+    """Extrai informações detalhadas de um produto"""
+    try:
+        # Nome do produto
+        name = soup.select_one('.page-title span, .product-info-main .page-title')
+        name = clean_text(name.text) if name else ""
+
+        # Preço do produto
+        price = soup.select_one('.product-info-main .price-wrapper .price, .price-box .price')
+        price = format_price(price.text) if price else "Preço não disponível"
+
+        # Código/SKU
+        sku = soup.select_one('.product.attribute.sku .value')
+        sku = clean_text(sku.text) if sku else ""
+
+        # Descrição
+        description = soup.select_one('.product.attribute.description .value, .description .value')
+        description = clean_text(description.text) if description else ""
+
+        # Imagem
+        image = soup.select_one('.gallery-placeholder img')
+        image_url = image['src'] if image and 'src' in image.attrs else ""
+
+        product = {
+            "Nome": name,
+            "Preço": price,
+            "Código (SKU)": sku,
+            "Descrição": description,
+            "Link da Imagem": image_url,
+            "Link do Produto": url
+        }
+
+        logger.info(f"Produto extraído: {name}")
+        return product
+
+    except Exception as e:
+        logger.error(f"Erro ao extrair produto: {e}")
+        return None
+
+def extract_category_products(url: str, soup: BeautifulSoup) -> list:
+    """Extrai produtos de uma página de categoria"""
+    products = []
+    
+    # Tenta encontrar a lista de produtos
+    product_items = soup.select('.products-grid .product-item, .product-items .product-item')
+    
+    for item in product_items:
+        try:
+            # Nome e Link
+            name_elem = item.select_one('.product-item-link')
+            name = clean_text(name_elem.text) if name_elem else ""
+            link = name_elem['href'] if name_elem and 'href' in name_elem.attrs else ""
+            
+            # Preço
+            price_elem = item.select_one('.price-wrapper .price')
+            price = format_price(price_elem.text) if price_elem else "Preço não disponível"
+            
+            # Código/SKU
+            sku_elem = item.select_one('[data-product-id]')
+            sku = sku_elem['data-product-id'] if sku_elem else ""
+            
+            # Imagem
+            image_elem = item.select_one('.product-image-photo')
+            image_url = image_elem['src'] if image_elem and 'src' in image_elem.attrs else ""
+
+            product = {
+                "Nome": name,
+                "Preço": price,
+                "Código (SKU)": sku,
+                "Link da Imagem": image_url,
+                "Link do Produto": link,
+                "Descrição": ""  # Descrição vazia para produtos em lista
+            }
+            
+            products.append(product)
+            logger.info(f"Produto de categoria encontrado: {name}")
+            
+        except Exception as e:
+            logger.error(f"Erro ao processar produto da categoria: {e}")
+            continue
+    
+    return products
+
+def scrape_hinode(url: str) -> list:
+    """Função principal de scraping"""
+    try:
+        logger.info(f"Iniciando scraping da URL: {url}")
+        response = requests.get(url, headers=HEADERS, timeout=30)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Verifica se é página de produto único ou categoria
+        if '/p' in url or soup.select_one('.product-info-main'):
+            product = extract_product_info(url, soup)
+            return [product] if product else []
+        else:
+            return extract_category_products(url, soup)
+            
+    except Exception as e:
+        logger.error(f"Erro no scraping: {e}")
+        return []
+
+def create_csv(products: list) -> BytesIO:
+    """Cria arquivo CSV com os produtos"""
+    try:
+        if not products:
+            return None
+            
+        output = StringIO()
+        
+        # Definir ordem das colunas
+        fieldnames = [
+            "Nome",
+            "Preço",
+            "Código (SKU)",
+            "Descrição",
+            "Link da Imagem",
+            "Link do Produto"
+        ]
+        
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        
+        for product in products:
+            # Garantir que todos os campos existem
+            row = {field: product.get(field, "") for field in fieldnames}
+            writer.writerow(row)
+        
+        return BytesIO(output.getvalue().encode('utf-8'))
+    except Exception as e:
+        logger.error(f"Erro ao criar CSV: {e}")
+        return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -40,71 +196,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "eu vou gerar um arquivo CSV com todas as informações.\n\n"
         "Exemplo: https://www.hinode.com.br/fragrancias/fragrancias-masculinas"
     )
-
-def extract_product_info(url: str) -> dict:
-    """Extrai informações de um produto da página"""
-    try:
-        logger.info(f"Extraindo informações da URL: {url}")
-        response = requests.get(url, headers=HEADERS, timeout=30)
-        response.raise_for_status()
-        
-        # Extrair dados usando regex
-        name_match = re.search(r'<h1[^>]*class="[^"]*page-title[^"]*"[^>]*>.*?<span>(.*?)</span>', response.text)
-        price_match = re.search(r'<span[^>]*class="[^"]*price[^"]*"[^>]*>(R?\$?\s*[\d,.]+)', response.text)
-        image_match = re.search(r'<img[^>]*class="[^"]*gallery-placeholder__image[^"]*"[^>]*src="([^"]*)"', response.text)
-        sku_match = re.search(r'data-product-id="(\d+)"', response.text)
-        desc_match = re.search(r'<div[^>]*class="[^"]*description[^"]*"[^>]*>(.*?)</div>', response.text, re.DOTALL)
-
-        product = {
-            "Nome": unquote(name_match.group(1).strip()) if name_match else "Nome não encontrado",
-            "Preço": price_match.group(1).strip() if price_match else "Preço não disponível",
-            "Código": sku_match.group(1) if sku_match else "",
-            "Imagem": image_match.group(1) if image_match else "",
-            "Link": url,
-            "Descrição": desc_match.group(1).strip() if desc_match else ""
-        }
-
-        logger.info(f"Produto encontrado: {product['Nome']}")
-        return product
-    except Exception as e:
-        logger.error(f"Erro ao extrair informações: {e}")
-        return None
-
-def extract_products_from_category(url: str) -> list:
-    """Extrai informações de produtos de uma página de categoria"""
-    try:
-        logger.info(f"Extraindo produtos da categoria: {url}")
-        response = requests.get(url, headers=HEADERS, timeout=30)
-        response.raise_for_status()
-        
-        # Extrair links dos produtos
-        product_links = re.findall(r'<a[^>]*class="[^"]*product-item-link[^"]*"[^>]*href="([^"]*)"', response.text)
-        
-        products = []
-        for link in product_links[:10]:  # Limitar a 10 produtos por vez
-            try:
-                product = extract_product_info(link)
-                if product:
-                    products.append(product)
-            except Exception as e:
-                logger.error(f"Erro ao processar produto {link}: {e}")
-                continue
-                
-        return products
-    except Exception as e:
-        logger.error(f"Erro ao extrair produtos da categoria: {e}")
-        return []
-
-def create_csv(products: list) -> BytesIO:
-    if not products:
-        return None
-        
-    output = StringIO()
-    writer = csv.DictWriter(output, fieldnames=products[0].keys())
-    writer.writeheader()
-    writer.writerows(products)
-    
-    return BytesIO(output.getvalue().encode('utf-8'))
 
 async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
@@ -115,14 +206,10 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         message = await update.message.reply_text("🔄 Coletando produtos...")
+        logger.info("Iniciando coleta de produtos")
         
-        # Verifica se é uma página de produto ou categoria
-        if '/p' in url:
-            product = extract_product_info(url)
-            products = [product] if product else []
-        else:
-            products = extract_products_from_category(url)
-
+        products = scrape_hinode(url)
+        
         if not products:
             await message.edit_text("❌ Nenhum produto encontrado. Tente um link diferente.")
             return
@@ -145,7 +232,7 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Erro ao processar URL: {e}")
         await message.edit_text(f"❌ Erro ao processar. Por favor, tente novamente.")
 
-# Configuração do bot e webhook
+# Configuração do bot
 bot = Application.builder().token(TOKEN).build()
 
 async def setup_bot():
