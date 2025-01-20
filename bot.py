@@ -30,8 +30,12 @@ if not TOKEN:
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Referer': 'https://www.hinode.com.br/',
+    'Connection': 'keep-alive'
 }
 
 def clean_text(text):
@@ -59,12 +63,12 @@ def format_price(price):
 def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
     """Extrai informações detalhadas de um produto"""
     try:
-        # Nome do produto - tentando vários seletores possíveis
+        # Nome do produto - atualizando seletores conforme site
         name_selectors = [
-            '.product-name h1',
-            '.page-title span',
-            '.product-info-main .page-title',
-            '.product-info-main h1'
+            'h1.page-title',
+            '.base[data-ui-id="page-title-wrapper"]',
+            '.product-info-main .page-title .base',
+            '.product-name .base'
         ]
         name = None
         for selector in name_selectors:
@@ -73,12 +77,12 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         name = clean_text(name.text) if name else ""
 
-        # Preço do produto - tentando vários seletores
+        # Preço do produto - atualizando seletores conforme site
         price_selectors = [
-            '.product-info-price .price',
-            '.price-box .price',
-            '.special-price .price',
-            '[data-price-type="finalPrice"] .price'
+            'span[data-price-type="finalPrice"] span.price',
+            '.special-price .price-wrapper .price',
+            '.price-box .price-final_price .price',
+            '.product-info-main .price'
         ]
         price = None
         for selector in price_selectors:
@@ -87,11 +91,12 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         price = format_price(price.text) if price else "Preço não disponível"
 
-        # Código/SKU - tentando vários seletores
+        # Código/SKU - atualizando seletores conforme site
         sku_selectors = [
             '.product.attribute.sku .value',
-            '[data-th="SKU"]',
-            '[itemprop="sku"]'
+            '.sku .value',
+            '[itemprop="sku"]',
+            '.product-info-stock-sku .sku .value'
         ]
         sku = None
         for selector in sku_selectors:
@@ -100,11 +105,12 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         sku = clean_text(sku.text) if sku else ""
 
-        # Descrição - tentando vários seletores
+        # Descrição - atualizando seletores conforme site
         desc_selectors = [
             '.product.attribute.description .value',
-            '.description .value',
-            '[itemprop="description"]'
+            '.product.attribute.overview .value',
+            '#description .product.attribute.description .value',
+            '.product-info-main .overview'
         ]
         description = None
         for selector in desc_selectors:
@@ -113,18 +119,19 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         description = clean_text(description.text) if description else ""
 
-        # Imagem - tentando vários seletores
+        # Imagem - atualizando seletores conforme site
         img_selectors = [
-            '.gallery-placeholder img',
-            '.product.media img',
-            '.fotorama__img'
+            '.gallery-placeholder__image',
+            '.fotorama__img',
+            '.fotorama__stage__shaft img',
+            '.product.media img.gallery-placeholder__image'
         ]
         image = None
         for selector in img_selectors:
             image = soup.select_one(selector)
-            if image and 'src' in image.attrs:
+            if image and ('src' in image.attrs or 'data-src' in image.attrs):
                 break
-        image_url = image['src'] if image and 'src' in image.attrs else ""
+        image_url = image.get('src') or image.get('data-src', '') if image else ""
 
         # Debug log
         logger.info(f"Nome encontrado: {name}")
@@ -153,11 +160,11 @@ def extract_category_products(url: str, soup: BeautifulSoup) -> list:
     """Extrai produtos de uma página de categoria"""
     products = []
     
-    # Tenta encontrar a lista de produtos com diferentes seletores
+    # Atualizando seletores para lista de produtos
     product_selectors = [
-        '.products-grid .product-item',
-        '.product-items .product-item',
-        '.product-list-item'
+        'ol.products.list.items.product-items li.item.product.product-item',
+        '.products-grid .product-items .product-item',
+        '.product-item-info'
     ]
     
     for selector in product_selectors:
@@ -167,24 +174,24 @@ def extract_category_products(url: str, soup: BeautifulSoup) -> list:
 
     for item in product_items:
         try:
-            # Nome e Link - tentando vários seletores
-            name_elem = item.select_one('.product-item-link, .product-name a')
+            # Nome e Link - atualizando seletores
+            name_elem = item.select_one('a.product-item-link, .product-name a, .product.name a')
             name = clean_text(name_elem.text) if name_elem else ""
             link = name_elem['href'] if name_elem and 'href' in name_elem.attrs else ""
             
-            # Preço - tentando vários seletores
-            price_elem = item.select_one('.price-box .price, .special-price .price, [data-price-type="finalPrice"] .price')
+            # Preço - atualizando seletores
+            price_elem = item.select_one('span[data-price-type="finalPrice"] span.price, .special-price .price, .price-box .price')
             price = format_price(price_elem.text) if price_elem else "Preço não disponível"
             
-            # Código/SKU - tentando vários métodos
+            # Código/SKU - atualizando seletores
             sku = item.get('data-product-sku', '')
             if not sku:
-                sku_elem = item.select_one('.product-sku, [data-product-id]')
+                sku_elem = item.select_one('[data-product-id], .product-sku')
                 if sku_elem:
                     sku = sku_elem.get('data-product-id', '') or clean_text(sku_elem.text)
             
-            # Imagem - tentando vários seletores
-            image_elem = item.select_one('.product-image-photo, .product-img-box img')
+            # Imagem - atualizando seletores
+            image_elem = item.select_one('.product-image-photo, img.photo.image, .product-item-photo img')
             image_url = ''
             if image_elem:
                 image_url = image_elem.get('src') or image_elem.get('data-src', '')
