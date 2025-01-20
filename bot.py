@@ -61,10 +61,10 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
     try:
         # Nome do produto - tentando vários seletores possíveis
         name_selectors = [
+            '.product-name h1',
             '.page-title span',
-            'h1.page-title',
-            '.product-info-main .product-name',
-            '[data-ui-id="page-title-wrapper"]'
+            '.product-info-main .page-title',
+            '.product-info-main h1'
         ]
         name = None
         for selector in name_selectors:
@@ -75,7 +75,8 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
 
         # Preço do produto - tentando vários seletores
         price_selectors = [
-            '.price-final_price .price',
+            '.product-info-price .price',
+            '.price-box .price',
             '.special-price .price',
             '[data-price-type="finalPrice"] .price'
         ]
@@ -86,11 +87,11 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         price = format_price(price.text) if price else "Preço não disponível"
 
-        # Código/SKU
+        # Código/SKU - tentando vários seletores
         sku_selectors = [
-            '[itemprop="sku"]',
             '.product.attribute.sku .value',
-            '[data-th="SKU"]'
+            '[data-th="SKU"]',
+            '[itemprop="sku"]'
         ]
         sku = None
         for selector in sku_selectors:
@@ -99,11 +100,11 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         sku = clean_text(sku.text) if sku else ""
 
-        # Descrição
+        # Descrição - tentando vários seletores
         desc_selectors = [
-            '[itemprop="description"]',
+            '.product.attribute.description .value',
             '.description .value',
-            '.product.attribute.description'
+            '[itemprop="description"]'
         ]
         description = None
         for selector in desc_selectors:
@@ -112,16 +113,16 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         description = clean_text(description.text) if description else ""
 
-        # Imagem
+        # Imagem - tentando vários seletores
         img_selectors = [
             '.gallery-placeholder img',
-            '[data-gallery-role="gallery-placeholder"] img',
-            '.product.media img'
+            '.product.media img',
+            '.fotorama__img'
         ]
         image = None
         for selector in img_selectors:
             image = soup.select_one(selector)
-            if image:
+            if image and 'src' in image.attrs:
                 break
         image_url = image['src'] if image and 'src' in image.attrs else ""
 
@@ -145,78 +146,104 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
     except Exception as e:
         logger.error(f"Erro ao extrair produto: {e}")
         logger.error("HTML da página:")
-        logger.error(soup.prettify()[:500])  # Primeiros 500 caracteres do HTML para debug
+        logger.error(soup.prettify()[:500])
         return None
 
 def extract_category_products(url: str, soup: BeautifulSoup) -> list:
     """Extrai produtos de uma página de categoria"""
     products = []
-
-    # Tenta encontrar a lista de produtos
-    product_items = soup.select('.products-grid .product-item, .product-items .product-item')
+    
+    # Tenta encontrar a lista de produtos com diferentes seletores
+    product_selectors = [
+        '.products-grid .product-item',
+        '.product-items .product-item',
+        '.product-list-item'
+    ]
+    
+    for selector in product_selectors:
+        product_items = soup.select(selector)
+        if product_items:
+            break
 
     for item in product_items:
         try:
-            # Nome e Link
-            name_elem = item.select_one('.product-item-link')
+            # Nome e Link - tentando vários seletores
+            name_elem = item.select_one('.product-item-link, .product-name a')
             name = clean_text(name_elem.text) if name_elem else ""
             link = name_elem['href'] if name_elem and 'href' in name_elem.attrs else ""
-
-            # Preço
-            price_elem = item.select_one('.price-wrapper .price')
+            
+            # Preço - tentando vários seletores
+            price_elem = item.select_one('.price-box .price, .special-price .price, [data-price-type="finalPrice"] .price')
             price = format_price(price_elem.text) if price_elem else "Preço não disponível"
+            
+            # Código/SKU - tentando vários métodos
+            sku = item.get('data-product-sku', '')
+            if not sku:
+                sku_elem = item.select_one('.product-sku, [data-product-id]')
+                if sku_elem:
+                    sku = sku_elem.get('data-product-id', '') or clean_text(sku_elem.text)
+            
+            # Imagem - tentando vários seletores
+            image_elem = item.select_one('.product-image-photo, .product-img-box img')
+            image_url = ''
+            if image_elem:
+                image_url = image_elem.get('src') or image_elem.get('data-src', '')
 
-            # Código/SKU
-            sku_elem = item.select_one('[data-product-id]')
-            sku = sku_elem['data-product-id'] if sku_elem else ""
-
-            # Imagem
-            image_elem = item.select_one('.product-image-photo')
-            image_url = image_elem['src'] if image_elem and 'src' in image_elem.attrs else ""
-
-            product = {
-                "Nome": name,
-                "Preço": price,
-                "Código (SKU)": sku,
-                "Link da Imagem": image_url,
-                "Link do Produto": link,
-                "Descrição": ""  # Descrição vazia para produtos em lista
-            }
-
-            products.append(product)
-            logger.info(f"Produto de categoria encontrado: {name}")
-
+            if name and (price != "Preço não disponível" or image_url):
+                product = {
+                    "Nome": name,
+                    "Preço": price,
+                    "Código (SKU)": sku,
+                    "Link da Imagem": image_url,
+                    "Link do Produto": link,
+                    "Descrição": ""
+                }
+                products.append(product)
+                logger.info(f"Produto de categoria encontrado: {name}")
+            
         except Exception as e:
             logger.error(f"Erro ao processar produto da categoria: {e}")
             continue
-
+    
     return products
+
+def clean_url(url: str) -> str:
+    """Limpa e normaliza a URL"""
+    url = url.strip()
+    # Remove parâmetros de UTM e outros
+    if '?' in url:
+        base_url = url.split('?')[0]
+        return base_url
+    return url
 
 def scrape_hinode(url: str) -> list:
     """Função principal de scraping"""
     try:
         logger.info(f"Iniciando scraping da URL: {url}")
-
+        url = clean_url(url)
+        
         # Adiciona um pequeno delay
         time.sleep(2)
-
+        
         session = requests.Session()
-
-        # Primeiro acessa a página inicial
+        
+        # Primeiro acessa a página inicial para obter cookies
         session.get("https://www.hinode.com.br", headers=HEADERS, timeout=30)
-
+        
         # Depois acessa a página do produto
         response = session.get(url, headers=HEADERS, timeout=30)
         response.raise_for_status()
-
+        
         soup = BeautifulSoup(response.text, 'html.parser')
-
-        if '/p' in url or soup.select_one('.product-info-main'):
+        
+        # Verifica se é página de produto único ou categoria
+        if '/p/' in url or soup.select_one('.product-info-main, .product-essential'):
             product = extract_product_info(url, soup)
             return [product] if product else []
         else:
-            return extract_category_products(url, soup)
-
+            products = extract_category_products(url, soup)
+            return [p for p in products if p and p["Nome"]]  # Remove produtos sem nome
+            
     except Exception as e:
         logger.error(f"Erro no scraping: {e}")
         return []
