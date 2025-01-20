@@ -63,12 +63,12 @@ def format_price(price):
 def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
     """Extrai informações detalhadas de um produto"""
     try:
-        # Nome do produto - atualizando seletores conforme site
+        # Nome do produto
         name_selectors = [
-            'h1.page-title',
-            '.base[data-ui-id="page-title-wrapper"]',
-            '.product-info-main .page-title .base',
-            '.product-name .base'
+            '.product-info-main .page-title span',
+            '.product-info-main h1.page-title',
+            '.product-name h1',
+            '[data-ui-id="page-title-wrapper"]'
         ]
         name = None
         for selector in name_selectors:
@@ -77,11 +77,11 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         name = clean_text(name.text) if name else ""
 
-        # Preço do produto - atualizando seletores conforme site
+        # Preço do produto
         price_selectors = [
-            'span[data-price-type="finalPrice"] span.price',
-            '.special-price .price-wrapper .price',
-            '.price-box .price-final_price .price',
+            '[data-price-type="finalPrice"] .price',
+            '.price-box .price',
+            '.special-price .price',
             '.product-info-main .price'
         ]
         price = None
@@ -91,12 +91,11 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         price = format_price(price.text) if price else "Preço não disponível"
 
-        # Código/SKU - atualizando seletores conforme site
+        # Código/SKU
         sku_selectors = [
+            '.product-info-stock-sku .value',
             '.product.attribute.sku .value',
-            '.sku .value',
-            '[itemprop="sku"]',
-            '.product-info-stock-sku .sku .value'
+            '[data-th="SKU"]'
         ]
         sku = None
         for selector in sku_selectors:
@@ -105,12 +104,12 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         sku = clean_text(sku.text) if sku else ""
 
-        # Descrição - atualizando seletores conforme site
+        # Descrição
         desc_selectors = [
             '.product.attribute.description .value',
             '.product.attribute.overview .value',
-            '#description .product.attribute.description .value',
-            '.product-info-main .overview'
+            '.description .value',
+            '.product-info__description'
         ]
         description = None
         for selector in desc_selectors:
@@ -119,12 +118,12 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         description = clean_text(description.text) if description else ""
 
-        # Imagem - atualizando seletores conforme site
+        # Imagem
         img_selectors = [
-            '.gallery-placeholder__image',
-            '.fotorama__img',
+            '.gallery-placeholder img',
             '.fotorama__stage__shaft img',
-            '.product.media img.gallery-placeholder__image'
+            '.product.media img',
+            '.gallery-placeholder__image'
         ]
         image = None
         for selector in img_selectors:
@@ -133,11 +132,13 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
                 break
         image_url = image.get('src') or image.get('data-src', '') if image else ""
 
-        # Debug log
-        logger.info(f"Nome encontrado: {name}")
-        logger.info(f"Preço encontrado: {price}")
-        logger.info(f"SKU encontrado: {sku}")
-        logger.info(f"Imagem encontrada: {image_url}")
+        # Debug log para verificar o que está sendo encontrado
+        logger.info(f"Debug - HTML da página: {soup.prettify()[:1000]}")
+        logger.info(f"Debug - Nome encontrado: {name}")
+        logger.info(f"Debug - Preço encontrado: {price}")
+        logger.info(f"Debug - SKU encontrado: {sku}")
+        logger.info(f"Debug - Descrição encontrada: {description}")
+        logger.info(f"Debug - Imagem encontrada: {image_url}")
 
         product = {
             "Nome": name,
@@ -152,8 +153,7 @@ def extract_product_info(url: str, soup: BeautifulSoup) -> dict:
 
     except Exception as e:
         logger.error(f"Erro ao extrair produto: {e}")
-        logger.error("HTML da página:")
-        logger.error(soup.prettify()[:500])
+        logger.error(f"HTML da página: {soup.prettify()[:1000]}")
         return None
 
 def extract_category_products(url: str, soup: BeautifulSoup) -> list:
@@ -229,30 +229,44 @@ def scrape_hinode(url: str) -> list:
         logger.info(f"Iniciando scraping da URL: {url}")
         url = clean_url(url)
         
-        # Adiciona um pequeno delay
-        time.sleep(2)
-        
         session = requests.Session()
         
+        # Configuração adicional dos headers
+        headers = HEADERS.copy()
+        headers['Referer'] = 'https://www.hinode.com.br/'
+        
         # Primeiro acessa a página inicial para obter cookies
-        session.get("https://www.hinode.com.br", headers=HEADERS, timeout=30)
+        session.get("https://www.hinode.com.br", headers=headers, timeout=30)
+        
+        # Pequeno delay para simular comportamento humano
+        time.sleep(2)
         
         # Depois acessa a página do produto
-        response = session.get(url, headers=HEADERS, timeout=30)
+        response = session.get(url, headers=headers, timeout=30)
         response.raise_for_status()
+        
+        # Log do status e conteúdo da resposta
+        logger.info(f"Status code: {response.status_code}")
+        logger.info(f"Conteúdo da resposta: {response.text[:500]}")
         
         soup = BeautifulSoup(response.text, 'html.parser')
         
+        # Verifica se há redirecionamento ou página de erro
+        if "página não foi encontrada" in response.text.lower():
+            logger.error("Página não encontrada")
+            return []
+            
         # Verifica se é página de produto único ou categoria
-        if '/p/' in url or soup.select_one('.product-info-main, .product-essential'):
+        if '/p/' in url or soup.select_one('.product-info-main'):
             product = extract_product_info(url, soup)
             return [product] if product else []
         else:
             products = extract_category_products(url, soup)
-            return [p for p in products if p and p["Nome"]]  # Remove produtos sem nome
+            return [p for p in products if p and p["Nome"]]
             
     except Exception as e:
         logger.error(f"Erro no scraping: {e}")
+        logger.error(f"URL: {url}")
         return []
 
 def create_csv(products: list) -> BytesIO:
